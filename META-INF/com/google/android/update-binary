@@ -1,0 +1,166 @@
+#!/sbin/sh
+# noKernel Flasher
+# s-k-y.e
+
+OUTFD=$2
+ZIPFILE=$3
+
+ui_print() {
+    echo -e "ui_print $1\nui_print" > /proc/self/fd/$OUTFD
+}
+
+ui_print "***********************************************"
+ui_print "         not_Kernel Installer"
+ui_print "         Target: r8q"
+ui_print "***********************************************"
+
+TMP_DIR="/tmp/kernel_flash"
+rm -rf "$TMP_DIR"
+mkdir -p "$TMP_DIR"
+cd "$TMP_DIR"
+
+unzip -o "$ZIPFILE" -d "$TMP_DIR"
+
+DEVICE=$(getprop ro.product.device)
+PRODUCT=$(getprop ro.build.product)
+MATCH=0
+
+for CODENAME in r8q r8qxx r8qxxx; do
+    if [ "$DEVICE" = "$CODENAME" ] || [ "$PRODUCT" = "$CODENAME" ]; then
+        MATCH=1
+        break
+    fi
+done
+
+if [ "$MATCH" -eq 0 ]; then
+    ui_print "Error: This package is for r8q, r8qxx, r8qxxx."
+    ui_print "Your device: $DEVICE / $PRODUCT"
+    exit 1
+fi
+
+SDK_VER=$(getprop ro.build.version.sdk)
+if [ -z "$SDK_VER" ]; then
+    mkdir -p /s
+    mount -o ro /dev/block/mapper/system /s 2>/dev/null || mount -o ro /dev/block/platform/soc/1d84000.ufshc/by-name/system /s 2>/dev/null
+    if [ -f /s/system/build.prop ]; then
+        SDK_VER=$(grep "ro.build.version.sdk=" /s/system/build.prop | cut -d= -f2)
+    fi
+    umount /s 2>/dev/null
+fi
+
+[ -z "$SDK_VER" ] && SDK_VER=30
+
+if [ "$SDK_VER" -lt 30 ] || [ "$SDK_VER" -gt 37 ]; then
+    ui_print "Error: Unsupported Android version (SDK $SDK_VER)."
+    ui_print "Requires Android 11 - 17."
+    exit 1
+fi
+
+BOOT_BLOCK="/dev/block/platform/soc/1d84000.ufshc/by-name/boot"
+VBMETA_BLOCK="/dev/block/platform/soc/1d84000.ufshc/by-name/vbmeta"
+DTBO_BLOCK="/dev/block/platform/soc/1d84000.ufshc/by-name/dtbo"
+
+chmod +x "$TMP_DIR/tools/magiskboot"
+MAGISKBOOT="$TMP_DIR/tools/magiskboot"
+
+ui_print "- Unpacking existing boot image..."
+dd if="$BOOT_BLOCK" of=boot.img
+"$MAGISKBOOT" unpack -h boot.img
+
+if [ ! -f kernel ]; then
+    ui_print "Error: Failed to unpack boot image!"
+    exit 1
+fi
+
+NEW_KERNEL=""
+if [ -f "$TMP_DIR/Image" ]; then
+    NEW_KERNEL="$TMP_DIR/Image"
+elif [ -f "$TMP_DIR/Image.gz" ]; then
+    NEW_KERNEL="$TMP_DIR/Image.gz"
+fi
+
+if [ -n "$NEW_KERNEL" ]; then
+    ui_print "- Replacing kernel binary..."
+    cp -f "$NEW_KERNEL" kernel
+fi
+
+if [ -f "$TMP_DIR/dtb" ]; then
+    ui_print "- Replacing DTB component..."
+    cp -f "$TMP_DIR/dtb" dtb
+fi
+
+ONEUI_VER=$(getprop ro.build.version.oneui)
+if [ -z "$ONEUI_VER" ]; then
+    mkdir -p /s
+    mount -o ro /dev/block/mapper/product /s 2>/dev/null || mount -o ro /dev/block/platform/soc/1d84000.ufshc/by-name/product /s 2>/dev/null
+    if [ -f /s/etc/build.prop ]; then
+        ONEUI_VER=$(grep "ro.build.version.oneui=" /s/etc/build.prop | cut -d= -f2)
+    fi
+    umount /s 2>/dev/null
+fi
+
+ui_print "- Adjusting boot image cmdline variables..."
+
+ORIG_CMDLINE=$(sed -n 's/^cmdline=//p' header)
+
+if [ -z "$ORIG_CMDLINE" ]; then
+    ui_print "Error: Failed to read boot image cmdline!"
+    exit 1
+fi
+
+NEW_CMDLINE="$ORIG_CMDLINE"
+
+for ARG in \
+    android.is_aosp \
+    android.is_uos \
+    ro.boot.verifiedbootstate
+do
+    NEW_CMDLINE=$(echo "$NEW_CMDLINE" | \
+        sed -E "s/(^| )${ARG}=[^ ]*//g")
+done
+
+NEW_CMDLINE=$(echo "$NEW_CMDLINE" | xargs)
+
+if [ "$ONEUI_VER" -ge 80000 ] 2>/dev/null; then
+    NEW_CMDLINE="$NEW_CMDLINE android.is_aosp=0 android.is_uos=1"
+elif [ -n "$ONEUI_VER" ]; then
+    NEW_CMDLINE="$NEW_CMDLINE android.is_aosp=0 android.is_uos=0"
+else
+    NEW_CMDLINE="$NEW_CMDLINE ro.boot.verifiedbootstate=green android.is_aosp=1 android.is_uos=0"
+fi
+
+sed -i "s|^cmdline=.*|cmdline=$NEW_CMDLINE|" header
+
+ui_print "+ Updated boot cmdline."
+
+ui_print "- Repacking boot image..."
+
+"$MAGISKBOOT" repack boot.img || {
+    ui_print "Error: Failed to repack boot image via Magiskboot!"
+    exit 1
+}
+
+if [ ! -f new-boot.img ]; then
+    ui_print "Error: new-boot.img was not generated!"
+    exit 1
+fi
+
+ui_print "- Flashing custom BOOT partition..."
+dd if=new-boot.img of="$BOOT_BLOCK"
+
+if [ -f "$TMP_DIR/vbmeta.img" ]; then
+    ui_print "- Flashing optional vbmeta image..."
+    dd if="$TMP_DIR/vbmeta.img" of="$VBMETA_BLOCK"
+fi
+
+if [ -f "$TMP_DIR/dtbo.img" ]; then
+    ui_print "- Flashing custom DTBO partition..."
+    dd if="$TMP_DIR/dtbo.img" of="$DTBO_BLOCK"
+fi
+
+ui_print "* Done."
+
+cd /
+rm -rf "$TMP_DIR"
+exit 0
+
