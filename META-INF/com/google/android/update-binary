@@ -59,17 +59,6 @@ if [ "$MATCH" -eq 0 ]; then
     exit 1
 fi
 
-if [ -z "$SDK_VER" ]; then
-    mkdir -p /s
-    mount -o ro /dev/block/mapper/system /s 2>/dev/null || mount -o ro /dev/block/platform/soc/1d84000.ufshc/by-name/system /s 2>/dev/null
-    if [ -f /s/system/build.prop ]; then
-        SDK_VER=$(grep "ro.build.version.sdk=" /s/system/build.prop | cut -d= -f2)
-    fi
-    umount /s 2>/dev/null
-fi
-
-[ -z "$SDK_VER" ] && SDK_VER=30
-
 if [ "$SDK_VER" -lt 30 ] || [ "$SDK_VER" -gt 37 ]; then
     ui_print "Error: Unsupported Android version (SDK $SDK_VER)."
     ui_print "Requires Android 11 - 17."
@@ -79,6 +68,7 @@ fi
 ui_print "***********************************************"
 ui_print "         not_Kernel Installer"
 ui_print "         Target: $DEVICE"
+ui_print "         Android SDK: $SDK_VER"
 ui_print "***********************************************"
 
 chmod +x "$TMP_DIR/tools/magiskboot"
