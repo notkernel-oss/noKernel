@@ -6,26 +6,46 @@
 OUTFD=$2
 ZIPFILE=$3
 
-ui_print() {
-    echo -e "ui_print $1\nui_print" > /proc/self/fd/$OUTFD
-}
-
-ui_print "***********************************************"
-ui_print "         not_Kernel Installer"
-ui_print "         Target: r8q"
-ui_print "***********************************************"
-
 TMP_DIR="/tmp/kernel_flash"
+
+ui_print() { echo -e "ui_print $1\nui_print" > /proc/self/fd/$OUTFD }
+
+BOOTMODE=false
+ps | grep zygote | grep -v grep >/dev/null && BOOTMODE=true
+$BOOTMODE || ps -A 2>/dev/null | grep zygote | grep -v grep >/dev/null && BOOTMODE=true
+
+if $BOOTMODE; then
+    DEVICE=$(getprop ro.product.system.device)
+    PRODUCT=$(getprop ro.build.product)
+    SDK_VER=$(getprop ro.build.version.sdk)
+    ONEUI_VER=$(getprop ro.build.version.oneui)
+else
+    mkdir -p /s
+
+    mount -o ro /dev/block/mapper/system /s 2>/dev/null || \
+    mount -o ro /dev/block/platform/soc/1d84000.ufshc/by-name/system /s 2>/dev/null
+
+    if [ -f /s/build.prop ]; then
+        ONEUI_VER=$(grep '^ro.build.version.oneui=' /s/build.prop | cut -d= -f2)
+        DEVICE=$(grep '^ro.product.system.device=' /s/build.prop | cut -d= -f2)
+        PRODUCT=$(grep '^ro.build.product=' /s/build.prop | cut -d= -f2)
+        SDK_VER=$(grep '^ro.build.version.sdk=' /s/build.prop | cut -d= -f2)
+    fi
+
+    umount /s 2>/dev/null
+fi
+
+BLOCK="/dev/block/platform/soc/1d84000.ufshc/by-name"
+BOOT_BLOCK="$BLOCK/boot"
+VBMETA_BLOCK="$BLOCK/vbmeta"
+DTBO_BLOCK="$BLOCK/dtbo"
+
 rm -rf "$TMP_DIR"
 mkdir -p "$TMP_DIR"
 cd "$TMP_DIR"
-
 unzip -o "$ZIPFILE" -d "$TMP_DIR"
 
-DEVICE=$(getprop ro.product.device)
-PRODUCT=$(getprop ro.build.product)
 MATCH=0
-
 for CODENAME in r8q r8qxx r8qxxx; do
     if [ "$DEVICE" = "$CODENAME" ] || [ "$PRODUCT" = "$CODENAME" ]; then
         MATCH=1
@@ -39,7 +59,6 @@ if [ "$MATCH" -eq 0 ]; then
     exit 1
 fi
 
-SDK_VER=$(getprop ro.build.version.sdk)
 if [ -z "$SDK_VER" ]; then
     mkdir -p /s
     mount -o ro /dev/block/mapper/system /s 2>/dev/null || mount -o ro /dev/block/platform/soc/1d84000.ufshc/by-name/system /s 2>/dev/null
@@ -57,9 +76,10 @@ if [ "$SDK_VER" -lt 30 ] || [ "$SDK_VER" -gt 37 ]; then
     exit 1
 fi
 
-BOOT_BLOCK="/dev/block/platform/soc/1d84000.ufshc/by-name/boot"
-VBMETA_BLOCK="/dev/block/platform/soc/1d84000.ufshc/by-name/vbmeta"
-DTBO_BLOCK="/dev/block/platform/soc/1d84000.ufshc/by-name/dtbo"
+ui_print "***********************************************"
+ui_print "         not_Kernel Installer"
+ui_print "         Target: $DEVICE"
+ui_print "***********************************************"
 
 chmod +x "$TMP_DIR/tools/magiskboot"
 MAGISKBOOT="$TMP_DIR/tools/magiskboot"
@@ -90,24 +110,9 @@ if [ -f "$TMP_DIR/dtb" ]; then
     cp -f "$TMP_DIR/dtb" dtb
 fi
 
-ONEUI_VER=$(getprop ro.build.version.oneui)
-if [ -z "$ONEUI_VER" ]; then
-    mkdir -p /s
-    mount -o ro /dev/block/mapper/product /s 2>/dev/null || mount -o ro /dev/block/platform/soc/1d84000.ufshc/by-name/product /s 2>/dev/null
-    if [ -f /s/etc/build.prop ]; then
-        ONEUI_VER=$(grep "ro.build.version.oneui=" /s/etc/build.prop | cut -d= -f2)
-    fi
-    umount /s 2>/dev/null
-fi
-
-ui_print "- Adjusting boot image cmdline variables..."
+ui_print "- Patching boot image cmdline variables..."
 
 ORIG_CMDLINE=$(sed -n 's/^cmdline=//p' header)
-
-if [ -z "$ORIG_CMDLINE" ]; then
-    ui_print "Error: Failed to read boot image cmdline!"
-    exit 1
-fi
 
 NEW_CMDLINE="$ORIG_CMDLINE"
 
@@ -132,8 +137,6 @@ fi
 
 sed -i "s|^cmdline=.*|cmdline=$NEW_CMDLINE|" header
 
-ui_print "+ Updated boot cmdline."
-
 ui_print "- Repacking boot image..."
 
 "$MAGISKBOOT" repack boot.img || {
@@ -141,16 +144,11 @@ ui_print "- Repacking boot image..."
     exit 1
 }
 
-if [ ! -f new-boot.img ]; then
-    ui_print "Error: new-boot.img was not generated!"
-    exit 1
-fi
-
 ui_print "- Flashing custom BOOT partition..."
 dd if=new-boot.img of="$BOOT_BLOCK"
 
 if [ -f "$TMP_DIR/vbmeta.img" ]; then
-    ui_print "- Flashing optional vbmeta image..."
+    ui_print "- Flashing custom VBMETA image..."
     dd if="$TMP_DIR/vbmeta.img" of="$VBMETA_BLOCK"
 fi
 
