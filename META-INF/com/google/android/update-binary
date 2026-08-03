@@ -8,11 +8,16 @@ ZIPFILE=$3
 
 TMP_DIR="/tmp/kernel_flash"
 
-ui_print() { echo -e "ui_print $1\nui_print" > /proc/self/fd/$OUTFD }
+ui_print() {
+    echo -e "ui_print $1\nui_print" > /proc/self/fd/$OUTFD
+}
 
+# Detect whether we're running inside Android or recovery
 BOOTMODE=false
-ps | grep zygote | grep -v grep >/dev/null && BOOTMODE=true
-$BOOTMODE || ps -A 2>/dev/null | grep zygote | grep -v grep >/dev/null && BOOTMODE=true
+if ps -A 2>/dev/null | grep -q zygote ||
+   ps 2>/dev/null | grep -q zygote; then
+    BOOTMODE=true
+fi
 
 if $BOOTMODE; then
     DEVICE=$(getprop ro.product.system.device)
@@ -22,28 +27,56 @@ if $BOOTMODE; then
 else
     mkdir -p /s
 
-    mount -o ro /dev/block/mapper/system /s 2>/dev/null || \
-    mount -o ro /dev/block/platform/soc/1d84000.ufshc/by-name/system /s 2>/dev/null
+    for SYS in \
+        /dev/block/mapper/system \
+        /dev/block/by-name/system \
+        /dev/block/platform/soc/1d84000.ufshc/by-name/system
+    do
+        if mount -o ro "$SYS" /s 2>/dev/null; then
+            break
+        fi
+    done
 
     if [ -f /s/build.prop ]; then
         ONEUI_VER=$(grep '^ro.build.version.oneui=' /s/build.prop | cut -d= -f2)
         DEVICE=$(grep '^ro.product.system.device=' /s/build.prop | cut -d= -f2)
         PRODUCT=$(grep '^ro.build.product=' /s/build.prop | cut -d= -f2)
         SDK_VER=$(grep '^ro.build.version.sdk=' /s/build.prop | cut -d= -f2)
+        umount /s 2>/dev/null
     fi
 
-    umount /s 2>/dev/null
+    # Fallback to getprop if recovery exposes these properties
+    [ -z "$DEVICE" ] && DEVICE=$(getprop ro.product.system.device)
+    [ -z "$PRODUCT" ] && PRODUCT=$(getprop ro.build.product)
+    [ -z "$SDK_VER" ] && SDK_VER=$(getprop ro.build.version.sdk)
+    [ -z "$ONEUI_VER" ] && ONEUI_VER=$(getprop ro.build.version.oneui)
 fi
 
-BLOCK="/dev/block/platform/soc/1d84000.ufshc/by-name"
-BOOT_BLOCK="$BLOCK/boot"
-VBMETA_BLOCK="$BLOCK/vbmeta"
-DTBO_BLOCK="$BLOCK/dtbo"
+if [ -z "$DEVICE" ] || [ -z "$SDK_VER" ]; then
+    ui_print "Error: Failed to detect device information."
+    exit 1
+fi
+
+# Locate partition block devices
+if [ -d /dev/block/by-name ]; then
+    BOOT_BLOCK=/dev/block/by-name/boot
+    VBMETA_BLOCK=/dev/block/by-name/vbmeta
+    DTBO_BLOCK=/dev/block/by-name/dtbo
+else
+    BLOCK=/dev/block/platform/soc/1d84000.ufshc/by-name
+    BOOT_BLOCK=$BLOCK/boot
+    VBMETA_BLOCK=$BLOCK/vbmeta
+    DTBO_BLOCK=$BLOCK/dtbo
+fi
 
 rm -rf "$TMP_DIR"
 mkdir -p "$TMP_DIR"
-cd "$TMP_DIR"
-unzip -o "$ZIPFILE" -d "$TMP_DIR"
+cd "$TMP_DIR" || exit 1
+
+unzip -o "$ZIPFILE" -d "$TMP_DIR" || {
+    ui_print "Error: Failed to extract installer package."
+    exit 1
+}
 
 MATCH=0
 for CODENAME in r8q r8qxx r8qxxx; do
@@ -71,14 +104,25 @@ ui_print "         Target: $DEVICE"
 ui_print "         Android SDK: $SDK_VER"
 ui_print "***********************************************"
 
-chmod +x "$TMP_DIR/tools/magiskboot"
 MAGISKBOOT="$TMP_DIR/tools/magiskboot"
 
+chmod +x "$MAGISKBOOT"
+
+if [ ! -x "$MAGISKBOOT" ]; then
+    ui_print "Error: magiskboot not found!"
+    exit 1
+fi
+
 ui_print "- Unpacking existing boot image..."
-dd if="$BOOT_BLOCK" of=boot.img
+
+dd if="$BOOT_BLOCK" of=boot.img || {
+    ui_print "Error: Failed to read boot partition!"
+    exit 1
+}
+
 "$MAGISKBOOT" unpack -h boot.img
 
-if [ ! -f kernel ]; then
+if [ $? -ne 0 ] || [ ! -f kernel ]; then
     ui_print "Error: Failed to unpack boot image!"
     exit 1
 fi
@@ -103,7 +147,6 @@ fi
 ui_print "- Patching boot image cmdline variables..."
 
 ORIG_CMDLINE=$(sed -n 's/^cmdline=//p' header)
-
 NEW_CMDLINE="$ORIG_CMDLINE"
 
 for ARG in \
@@ -111,11 +154,12 @@ for ARG in \
     android.is_uos \
     ro.boot.verifiedbootstate
 do
-    NEW_CMDLINE=$(echo "$NEW_CMDLINE" | \
+    NEW_CMDLINE=$(printf '%s\n' "$NEW_CMDLINE" | \
         sed -E "s/(^| )${ARG}=[^ ]*//g")
 done
 
-NEW_CMDLINE=$(echo "$NEW_CMDLINE" | xargs)
+NEW_CMDLINE=$(printf '%s\n' "$NEW_CMDLINE" | \
+    sed 's/^ *//;s/ *$//;s/  */ /g')
 
 if [ "$ONEUI_VER" -ge 80000 ] 2>/dev/null; then
     NEW_CMDLINE="$NEW_CMDLINE android.is_aosp=0 android.is_uos=1"
@@ -130,26 +174,40 @@ sed -i "s|^cmdline=.*|cmdline=$NEW_CMDLINE|" header
 ui_print "- Repacking boot image..."
 
 "$MAGISKBOOT" repack boot.img || {
-    ui_print "Error: Failed to repack boot image via Magiskboot!"
+    ui_print "Error: Failed to repack boot image!"
     exit 1
 }
 
 ui_print "- Flashing custom BOOT partition..."
-dd if=new-boot.img of="$BOOT_BLOCK"
+
+dd if=new-boot.img of="$BOOT_BLOCK" || {
+    ui_print "Error: Failed to flash boot partition!"
+    exit 1
+}
 
 if [ -f "$TMP_DIR/vbmeta.img" ]; then
     ui_print "- Flashing custom VBMETA image..."
-    dd if="$TMP_DIR/vbmeta.img" of="$VBMETA_BLOCK"
+
+    dd if="$TMP_DIR/vbmeta.img" of="$VBMETA_BLOCK" || {
+        ui_print "Error: Failed to flash vbmeta!"
+        exit 1
+    }
 fi
 
 if [ -f "$TMP_DIR/dtbo.img" ]; then
     ui_print "- Flashing custom DTBO partition..."
-    dd if="$TMP_DIR/dtbo.img" of="$DTBO_BLOCK"
+
+    dd if="$TMP_DIR/dtbo.img" of="$DTBO_BLOCK" || {
+        ui_print "Error: Failed to flash dtbo!"
+        exit 1
+    }
 fi
+
+"$MAGISKBOOT" cleanup >/dev/null 2>&1
 
 ui_print "* Done."
 
 cd /
 rm -rf "$TMP_DIR"
-exit 0
 
+exit 0
