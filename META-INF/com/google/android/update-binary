@@ -41,7 +41,7 @@ else
         ONEUI_VER=$(grep '^ro.build.version.oneui=' /s/build.prop | cut -d= -f2)
         DEVICE=$(grep '^ro.product.system.device=' /s/build.prop | cut -d= -f2)
         PRODUCT=$(grep '^ro.build.product=' /s/build.prop | cut -d= -f2)
-        SDK_VER=$(grep '^ro.build.version.sdk=' /s/build.prop | cut -d= -f2)
+        SDK_VER=$(grep '^ro.system.build.version.sdk=' /s/build.prop | cut -d= -f2)
         umount /s 2>/dev/null
     fi
 
